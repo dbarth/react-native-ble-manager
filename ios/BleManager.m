@@ -33,6 +33,7 @@ bool hasListeners;
         writeQueue = [NSMutableArray array];
         notificationCallbacks = [NSMutableDictionary new];
         stopNotificationCallbacks = [NSMutableDictionary new];
+	l2capChannel = nil;
         _instance = self;
         NSLog(@"BleManager created");
         
@@ -507,14 +508,14 @@ RCT_EXPORT_METHOD(write:(NSString *)deviceUUID serviceUUID:(NSString*)serviceUUI
     NSData *dataMessage = [NSData dataWithBytesNoCopy:bytes length:c freeWhenDone:YES];
     
     if (context) {
-        RCTLogInfo(@"Message to write(%lu): %@ ", (unsigned long)[message count], message);
+        // RCTLogInfo(@"Message to write(%lu): %@ ", (unsigned long)[message count], message);
         CBPeripheral *peripheral = [context peripheral];
         CBCharacteristic *characteristic = [context characteristic];
         
         NSString *key = [self keyForPeripheral: peripheral andCharacteristic:characteristic];
         [writeCallbacks setObject:callback forKey:key];
         
-        RCTLogInfo(@"Message to write(%lu): %@ ", (unsigned long)[dataMessage length], [dataMessage hexadecimalString]);
+        // RCTLogInfo(@"Message to write(%lu): %@ ", (unsigned long)[dataMessage length], [dataMessage hexadecimalString]);
         if ([dataMessage length] > maxByteSize){
             int dataLength = (int)dataMessage.length;
             int count = 0;
@@ -1036,6 +1037,102 @@ RCT_EXPORT_METHOD(requestMTU:(NSString *)deviceUUID mtu:(NSInteger)mtu callback:
 +(BleManager *)getInstance
 {
     return _instance;
+}
+
+RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm callback:(nonnull RCTResponseSenderBlock)callback)
+{
+    if (@available(iOS 11, *)) {
+
+    if (self->l2capChannel) {
+	callback(@[@"L2CAP channel already open"]);
+	return;
+    }
+
+    CBPeripheral *peripheral = [self findPeripheralByUUID:peripheralUUID];
+    if (peripheral && peripheral.state == CBPeripheralStateConnected) {
+	RCTLogInfo(@"openL2CAPChannel psm: %ld", (long)psm);
+	[peripheral openL2CAPChannel:psm];
+    } else {
+	callback(@[@"Peripheral not found or not connected"]);
+    }
+
+    } else {
+	callback(@[@"openL2CAPChannel requires iOS 11+"]);
+    }
+}
+
+-(void)peripheral:(CBPeripheral *)peripheral didOpenL2CAPChannel:(nullable CBL2CAPChannel *)channel error:(nullable NSError *)error API_AVAILABLE(ios(11.0))
+{
+    if (@available(iOS 11, *)) {
+
+    if (error) {
+        RCTLogInfo(@"didOpenL2CAPChannel: %@", error);
+	return;
+    }
+
+    RCTLogInfo(@"didOpenL2CAPChannel");
+    self->l2capChannel = channel;
+    
+    self.inputStream = self->l2capChannel.inputStream;
+    self.inputStream.delegate = self;
+    
+    [self.inputStream scheduleInRunLoop:[NSRunLoop currentRunLoop]
+                           forMode:NSDefaultRunLoopMode];
+    [self.inputStream open];
+
+    self.outputStream = self->l2capChannel.outputStream;
+    self.outputStream.delegate = self;
+    
+    [self.outputStream scheduleInRunLoop:[NSRunLoop currentRunLoop]
+                           forMode:NSDefaultRunLoopMode];
+    [self.outputStream open];
+    }
+}
+
+-(void)receiveStreamData
+{
+    NSMutableData* data = [NSMutableData data];
+    static uint8_t buf[1024];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // Background Thread.
+        [self.inputStream read:buf maxLength:1024];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Main Thread.
+            [data appendBytes:buf length:sizeof(buf)];
+
+            NSString* str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+	    RCTLogInfo(@"receiveStreamData %@", str);
+        });
+    });
+}
+
+// ------------------------------
+// NSStreamDelegate
+// ------------------------------
+
+-(void)stream:(NSStream *)aStream handleEvent:(NSStreamEvent)eventCode
+{
+    RCTLogInfo(@"%@ (%lu)", aStream, eventCode);
+    
+    switch (eventCode) {
+        case NSStreamEventOpenCompleted:            
+            break;
+        case NSStreamEventHasSpaceAvailable:
+            break;
+        case NSStreamEventHasBytesAvailable:
+            [self receiveStreamData];
+            break;
+        case NSStreamEventErrorOccurred:
+            break;
+        case NSStreamEventEndEncountered:
+            break;
+        case NSStreamEventNone:
+            break;
+        default:
+            break;
+    }
 }
 
 @end

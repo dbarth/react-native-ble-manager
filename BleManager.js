@@ -410,6 +410,18 @@ class BleManager {
       });
     });
   }
+
+  openL2CAPChannel(peripheralId, psm) {
+    return new Promise((fullfill, reject) => {
+      bleManager.openL2CAPChannel(peripheralId, psm, error => {
+	if (error) {
+	  reject(error);
+	} else {
+	  fullfill(psm);
+	}
+      });
+    });
+  }
 }
 
 module.exports = new BleManager();
