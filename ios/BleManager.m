@@ -77,7 +77,7 @@ bool hasListeners;
 
 - (NSArray<NSString *> *)supportedEvents
 {
-    return @[@"BleManagerDidUpdateValueForCharacteristic", @"BleManagerStopScan", @"BleManagerDiscoverPeripheral", @"BleManagerConnectPeripheral", @"BleManagerDisconnectPeripheral", @"BleManagerDidUpdateState", @"BleManagerCentralManagerWillRestoreState"];
+    return @[@"BleManagerDidUpdateValueForCharacteristic", @"BleManagerStopScan", @"BleManagerDiscoverPeripheral", @"BleManagerConnectPeripheral", @"BleManagerDisconnectPeripheral", @"BleManagerDidUpdateState", @"BleManagerCentralManagerWillRestoreState", @"BleManagerDidReceiveDataStream"];
 }
 
 
@@ -1051,7 +1051,8 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
     CBPeripheral *peripheral = [self findPeripheralByUUID:peripheralUUID];
     if (peripheral && peripheral.state == CBPeripheralStateConnected) {
 	RCTLogInfo(@"openL2CAPChannel psm: %ld", (long)psm);
-	[peripheral openL2CAPChannel:psm];
+	self->psm = (CBL2CAPPSM)psm;
+	[peripheral openL2CAPChannel:self->psm];
     } else {
 	callback(@[@"Peripheral not found or not connected"]);
     }
@@ -1070,20 +1071,20 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 	return;
     }
 
-    RCTLogInfo(@"didOpenL2CAPChannel");
+    RCTLogInfo(@"didOpenL2CAPChannel %@", channel);
     self->l2capChannel = channel;
     
     self.inputStream = self->l2capChannel.inputStream;
     self.inputStream.delegate = self;
     
-    [self.inputStream scheduleInRunLoop:[NSRunLoop currentRunLoop]
+    [self.inputStream scheduleInRunLoop:[NSRunLoop mainRunLoop]
                            forMode:NSDefaultRunLoopMode];
     [self.inputStream open];
 
     self.outputStream = self->l2capChannel.outputStream;
     self.outputStream.delegate = self;
     
-    [self.outputStream scheduleInRunLoop:[NSRunLoop currentRunLoop]
+    [self.outputStream scheduleInRunLoop:[NSRunLoop mainRunLoop]
                            forMode:NSDefaultRunLoopMode];
     [self.outputStream open];
     }
@@ -1103,9 +1104,44 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
             [data appendBytes:buf length:sizeof(buf)];
 
             NSString* str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-	    RCTLogInfo(@"receiveStreamData %@", str);
+	    // RCTLogInfo(@"receiveStreamData %@", str);
+
+	    if (hasListeners) {
+		NSArray *array = [peripherals allObjects];
+		CBPeripheral *peripheral = array[0];
+		[self sendEventWithName:@"BleManagerDidReceiveDataStream" body:@{@"peripheral": peripheral.uuidAsString, @"psm": [NSNumber numberWithInt:self->psm], @"data": ([data length] > 0) ? [data toArray] : [NSNull null]}];
+	    }
         });
     });
+}
+
+RCT_EXPORT_METHOD(sendL2CAPStreamData:(NSString *)peripheralUUID psm:(NSInteger)psm message:(NSArray*)message callback:(nonnull RCTResponseSenderBlock)callback)
+{
+    // Note: peripheralUUID ignored, psm ignored
+
+    if (! [self.outputStream hasSpaceAvailable]) {
+	callback(@[@"No space available, skip"]);
+        return;
+    }
+
+    unsigned long c = [message count];
+    uint8_t *bytes = malloc(sizeof(*bytes) * c);
+
+    unsigned i;
+    for (i = 0; i < c; i++) {
+        NSNumber *number = [message objectAtIndex:i];
+        int byte = [number intValue];
+        bytes[i] = byte;
+    }
+    NSData *data = [NSData dataWithBytesNoCopy:bytes length:c freeWhenDone:YES];
+
+    NSInteger res = [self.outputStream write:[data bytes] maxLength:[data length]];
+    if (res < [data length]) {
+        RCTLogInfo(@"Error: write %d out of %u", [data length], (int) res);
+	callback(@[@"partial write"]);
+    } else {
+	callback(@[]);
+    }
 }
 
 // ------------------------------
@@ -1114,8 +1150,11 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 
 -(void)stream:(NSStream *)aStream handleEvent:(NSStreamEvent)eventCode
 {
-    RCTLogInfo(@"%@ (%lu)", aStream, eventCode);
-    
+    NSMutableData* data = [NSMutableData data];
+    static uint8_t buf[1024];
+
+    // RCTLogInfo(@"%@ (%lu)", aStream, eventCode);
+
     switch (eventCode) {
         case NSStreamEventOpenCompleted:            
             break;

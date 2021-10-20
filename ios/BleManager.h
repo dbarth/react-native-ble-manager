@@ -15,6 +15,7 @@
     NSMutableDictionary *stopNotificationCallbacks;
     NSMutableDictionary *retrieveServicesLatches;
     CBL2CAPChannel *l2capChannel;
+    CBL2CAPPSM psm;
 }
 
 @property (strong, nonatomic) NSMutableSet *peripherals;
