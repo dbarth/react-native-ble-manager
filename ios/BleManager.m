@@ -1071,7 +1071,7 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 	return;
     }
 
-    RCTLogInfo(@"didOpenL2CAPChannel %@", channel);
+    // RCTLogInfo(@"didOpenL2CAPChannel %@", channel);
     self->l2capChannel = channel;
     
     self.inputStream = self->l2capChannel.inputStream;
@@ -1097,11 +1097,13 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // Background Thread.
-        [self.inputStream read:buf maxLength:1024];
+        int read_len = [self.inputStream read:buf maxLength:1024];
+	if (read_len < 0)
+	    return;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             // Main Thread.
-            [data appendBytes:buf length:sizeof(buf)];
+            [data appendBytes:buf length:read_len];
 
             NSString* str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 	    // RCTLogInfo(@"receiveStreamData %@", str);
