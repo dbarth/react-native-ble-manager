@@ -14,6 +14,7 @@
     NSMutableDictionary *notificationCallbacks;
     NSMutableDictionary *stopNotificationCallbacks;
     NSMutableDictionary *retrieveServicesLatches;
+    NSMutableDictionary *openL2CAPCallbacks;
     CBL2CAPChannel *l2capChannel;
     CBL2CAPPSM psm;
 }

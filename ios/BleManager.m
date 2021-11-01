@@ -33,6 +33,7 @@ bool hasListeners;
         writeQueue = [NSMutableArray array];
         notificationCallbacks = [NSMutableDictionary new];
         stopNotificationCallbacks = [NSMutableDictionary new];
+	openL2CAPCallbacks = [NSMutableDictionary new];
 	l2capChannel = nil;
         _instance = self;
         NSLog(@"BleManager created");
@@ -785,6 +786,11 @@ RCT_EXPORT_METHOD(requestMTU:(NSString *)deviceUUID mtu:(NSInteger)mtu callback:
     });
     
     [writeQueue removeAllObjects];
+
+    // free the previous l2cap channel & streams
+    self->l2capChannel = nil;
+    self.inputStream = nil;
+    self.outputStream = nil;
 }
 
 - (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
@@ -863,6 +869,17 @@ RCT_EXPORT_METHOD(requestMTU:(NSString *)deviceUUID mtu:(NSInteger)mtu callback:
     if (hasListeners) {
         [self sendEventWithName:@"BleManagerDisconnectPeripheral" body:@{@"peripheral": [peripheral uuidAsString]}];
     }
+
+    RCTResponseSenderBlock openL2CAPCallback = [openL2CAPCallbacks valueForKey:peripheralUUIDString];
+    if (openL2CAPCallback) {
+        openL2CAPCallback(@[errorStr]);
+        [openL2CAPCallbacks removeObjectForKey:peripheralUUIDString];
+    }
+
+    // free the previous l2cap channel & streams
+    self->l2capChannel = nil;
+    self.inputStream = nil;
+    self.outputStream = nil;
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error {
@@ -1050,7 +1067,8 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 
     CBPeripheral *peripheral = [self findPeripheralByUUID:peripheralUUID];
     if (peripheral && peripheral.state == CBPeripheralStateConnected) {
-	RCTLogInfo(@"openL2CAPChannel psm: %ld", (long)psm);
+	// RCTLogInfo(@"openL2CAPChannel psm: %ld", (long)psm);
+        [openL2CAPCallbacks setObject:callback forKey:peripheralUUID];	
 	self->psm = (CBL2CAPPSM)psm;
 	[peripheral openL2CAPChannel:self->psm];
     } else {
@@ -1066,8 +1084,15 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 {
     if (@available(iOS 11, *)) {
 
+    RCTResponseSenderBlock openL2CAPCallback = [openL2CAPCallbacks valueForKey:[peripheral uuidAsString]];
+
     if (error) {
-        RCTLogInfo(@"didOpenL2CAPChannel: %@", error);
+        // RCTLogInfo(@"didOpenL2CAPChannel: %@", error);
+	if (openL2CAPCallback) {
+	    NSString *errorStr = [NSString stringWithFormat:@"%@", error];
+	    openL2CAPCallback(@[errorStr, [NSNull null]]);
+	    [openL2CAPCallbacks removeObjectForKey:[peripheral uuidAsString]];
+	}
 	return;
     }
 
@@ -1087,6 +1112,12 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
     [self.outputStream scheduleInRunLoop:[NSRunLoop mainRunLoop]
                            forMode:NSDefaultRunLoopMode];
     [self.outputStream open];
+
+    if (openL2CAPCallback) {
+	openL2CAPCallback(@[[NSNull null], [peripheral asDictionary]]);
+	[openL2CAPCallbacks removeObjectForKey:[peripheral uuidAsString]];
+    }
+
     }
 }
 

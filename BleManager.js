@@ -412,12 +412,12 @@ class BleManager {
   }
 
   openL2CAPChannel(peripheralId, psm) {
-    return new Promise((fullfill, reject) => {
+    return new Promise((fulfill, reject) => {
       bleManager.openL2CAPChannel(peripheralId, psm, error => {
 	if (error) {
 	  reject(error);
 	} else {
-	  fullfill(psm);
+	  fulfill(psm);
 	}
       });
     });
