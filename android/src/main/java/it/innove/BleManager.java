@@ -709,7 +709,7 @@ class BleManager extends ReactContextBaseJavaModule {
                     peripheralUUID = peripheralUUID.toUpperCase();
                 }
                 if (BluetoothAdapter.checkBluetoothAddress(peripheralUUID)) {
-                    BluetoothDevice device = bluetoothAdapter.getRemoteDevice(peripheralUUID);
+                    BluetoothDevice device = getBluetoothAdapter().getRemoteDevice(peripheralUUID);
                     if (Build.VERSION.SDK_INT >= LOLLIPOP && !forceLegacy) {
                         peripheral = new LollipopPeripheral(device, reactContext);
                     } else {
