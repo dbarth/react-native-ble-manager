@@ -16,6 +16,7 @@
     NSMutableDictionary *retrieveServicesLatches;
     NSMutableDictionary *openL2CAPCallbacks;
     CBL2CAPChannel *l2capChannel;
+    CBPeripheral *l2capPeripheral;
     CBL2CAPPSM psm;
 }
 

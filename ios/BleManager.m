@@ -787,10 +787,7 @@ RCT_EXPORT_METHOD(requestMTU:(NSString *)deviceUUID mtu:(NSInteger)mtu callback:
     
     [writeQueue removeAllObjects];
 
-    // free the previous l2cap channel & streams
-    self->l2capChannel = nil;
-    self.inputStream = nil;
-    self.outputStream = nil;
+    [self closeL2CAPChannel];
 }
 
 - (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
@@ -876,10 +873,7 @@ RCT_EXPORT_METHOD(requestMTU:(NSString *)deviceUUID mtu:(NSInteger)mtu callback:
         [openL2CAPCallbacks removeObjectForKey:peripheralUUIDString];
     }
 
-    // free the previous l2cap channel & streams
-    self->l2capChannel = nil;
-    self.inputStream = nil;
-    self.outputStream = nil;
+    [self closeL2CAPChannel];
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error {
@@ -1056,6 +1050,27 @@ RCT_EXPORT_METHOD(requestMTU:(NSString *)deviceUUID mtu:(NSInteger)mtu callback:
     return _instance;
 }
 
+-(void)closeL2CAPChannel
+{
+    // Close the streams and remove them from the runloop before
+    // dropping references — otherwise the runloop holds onto them
+    // and they keep firing events on a dead channel.
+    if (self.inputStream) {
+        [self.inputStream close];
+        [self.inputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
+        self.inputStream.delegate = nil;
+        self.inputStream = nil;
+    }
+    if (self.outputStream) {
+        [self.outputStream close];
+        [self.outputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
+        self.outputStream.delegate = nil;
+        self.outputStream = nil;
+    }
+    self->l2capChannel = nil;
+    self->l2capPeripheral = nil;
+}
+
 RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm callback:(nonnull RCTResponseSenderBlock)callback)
 {
     if (@available(iOS 11, *)) {
@@ -1098,7 +1113,8 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 
     // RCTLogInfo(@"didOpenL2CAPChannel %@", channel);
     self->l2capChannel = channel;
-    
+    self->l2capPeripheral = peripheral;
+
     self.inputStream = self->l2capChannel.inputStream;
     self.inputStream.delegate = self;
     
@@ -1123,27 +1139,29 @@ RCT_EXPORT_METHOD(openL2CAPChannel:(NSString *)peripheralUUID psm:(NSInteger)psm
 
 -(void)receiveStreamData
 {
-    NSMutableData* data = [NSMutableData data];
-    static uint8_t buf[1024];
+    // Read off the main thread, then dispatch the event back to it.
+    // The buffer is local to the block so concurrent invocations
+    // (e.g. back-to-back HasBytesAvailable events) don't trample each other.
+    NSInputStream *stream = self.inputStream;
+    if (stream == nil) return;
+    CBPeripheral *peripheral = self->l2capPeripheral;
+    CBL2CAPPSM channelPsm = self->psm;
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // Background Thread.
-        int read_len = [self.inputStream read:buf maxLength:1024];
-	if (read_len < 0)
-	    return;
+        uint8_t buf[1024];
+        NSInteger read_len = [stream read:buf maxLength:sizeof(buf)];
+        if (read_len <= 0)
+            return;
+
+        NSData *data = [NSData dataWithBytes:buf length:read_len];
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            // Main Thread.
-            [data appendBytes:buf length:read_len];
-
-            NSString* str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-	    // RCTLogInfo(@"receiveStreamData %@", str);
-
-	    if (hasListeners) {
-		NSArray *array = [peripherals allObjects];
-		CBPeripheral *peripheral = array[0];
-		[self sendEventWithName:@"BleManagerDidReceiveDataStream" body:@{@"peripheral": peripheral.uuidAsString, @"psm": [NSNumber numberWithInt:self->psm], @"data": ([data length] > 0) ? [data toArray] : [NSNull null]}];
-	    }
+            if (! hasListeners) return;
+            if (peripheral == nil) return;
+            [self sendEventWithName:@"BleManagerDidReceiveDataStream"
+                               body:@{@"peripheral": peripheral.uuidAsString,
+                                      @"psm": [NSNumber numberWithInt:channelPsm],
+                                      @"data": [data toArray]}];
         });
     });
 }
@@ -1169,8 +1187,8 @@ RCT_EXPORT_METHOD(sendL2CAPStreamData:(NSString *)peripheralUUID psm:(NSInteger)
     NSData *data = [NSData dataWithBytesNoCopy:bytes length:c freeWhenDone:YES];
 
     NSInteger res = [self.outputStream write:[data bytes] maxLength:[data length]];
-    if (res < [data length]) {
-        RCTLogInfo(@"Error: write %d out of %u", [data length], (int) res);
+    if (res < (NSInteger)[data length]) {
+        RCTLogInfo(@"L2CAP partial write: %ld out of %lu bytes", (long)res, (unsigned long)[data length]);
 	callback(@[@"partial write"]);
     } else {
 	callback(@[]);
@@ -1183,13 +1201,10 @@ RCT_EXPORT_METHOD(sendL2CAPStreamData:(NSString *)peripheralUUID psm:(NSInteger)
 
 -(void)stream:(NSStream *)aStream handleEvent:(NSStreamEvent)eventCode
 {
-    NSMutableData* data = [NSMutableData data];
-    static uint8_t buf[1024];
-
     // RCTLogInfo(@"%@ (%lu)", aStream, eventCode);
 
     switch (eventCode) {
-        case NSStreamEventOpenCompleted:            
+        case NSStreamEventOpenCompleted:
             break;
         case NSStreamEventHasSpaceAvailable:
             break;
@@ -1197,8 +1212,8 @@ RCT_EXPORT_METHOD(sendL2CAPStreamData:(NSString *)peripheralUUID psm:(NSInteger)
             [self receiveStreamData];
             break;
         case NSStreamEventErrorOccurred:
-            break;
         case NSStreamEventEndEncountered:
+            [self closeL2CAPChannel];
             break;
         case NSStreamEventNone:
             break;
