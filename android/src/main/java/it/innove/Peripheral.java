@@ -8,6 +8,7 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothProfile;
+import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
@@ -19,12 +20,16 @@ import android.util.Log;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReactContext;
+import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.RCTNativeAppEventEmitter;
 
 import org.json.JSONException;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Map;
@@ -71,6 +76,15 @@ public class Peripheral extends BluetoothGattCallback {
         private boolean commandQueueBusy = false;
 
 	private List<byte[]> writeQueue = new ArrayList<>();
+
+	// L2CAP CoC channel state (LE Credit-Based — Android API 29+).
+	// Mirrors the iOS implementation: at most one channel open at a time.
+	private BluetoothSocket l2capSocket;
+	private InputStream l2capInputStream;
+	private OutputStream l2capOutputStream;
+	private Thread l2capReaderThread;
+	private volatile boolean l2capRunning;
+	private int l2capPsm;
 
 	public Peripheral(BluetoothDevice device, int advertisingRSSI, byte[] scanRecord, ReactContext reactContext) {
 		this.device = device;
@@ -138,6 +152,8 @@ public class Peripheral extends BluetoothGattCallback {
 		clearBuffers();
 		commandQueue.clear();
 		commandQueueBusy = false;
+
+		closeL2CAPChannel();
 
 		if (gatt != null) {
 			try {
@@ -983,6 +999,127 @@ public class Peripheral extends BluetoothGattCallback {
 
 	private String generateHashKey(UUID serviceUUID, BluetoothGattCharacteristic characteristic) {
 		return String.valueOf(serviceUUID) + "|" + characteristic.getUuid() + "|" + characteristic.getInstanceId();
+	}
+
+	// ---------------- L2CAP (LE Credit-Based, API 29+) ----------------
+
+	public void openL2CAPChannel(final int psm, final Callback callback) {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+			callback.invoke("L2CAP requires Android 10 (API 29) or higher");
+			return;
+		}
+		if (l2capSocket != null) {
+			callback.invoke("L2CAP channel already open");
+			return;
+		}
+		if (!isConnected()) {
+			callback.invoke("Peripheral not connected");
+			return;
+		}
+
+		new Thread(new Runnable() {
+			@Override
+			public void run() {
+				BluetoothSocket socket = null;
+				try {
+					socket = device.createInsecureL2capChannel(psm);
+					socket.connect();
+				} catch (IOException e) {
+					Log.e(BleManager.LOG_TAG, "L2CAP connect failed (psm " + psm + ")", e);
+					if (socket != null) {
+						try { socket.close(); } catch (IOException ignored) {}
+					}
+					callback.invoke(e.toString());
+					return;
+				}
+
+				try {
+					l2capInputStream = socket.getInputStream();
+					l2capOutputStream = socket.getOutputStream();
+				} catch (IOException e) {
+					Log.e(BleManager.LOG_TAG, "L2CAP getStreams failed", e);
+					try { socket.close(); } catch (IOException ignored) {}
+					callback.invoke(e.toString());
+					return;
+				}
+
+				l2capSocket = socket;
+				l2capPsm = psm;
+				l2capRunning = true;
+				startL2CAPReader();
+
+				Log.d(BleManager.LOG_TAG, "L2CAP channel open (psm " + psm + ")");
+				callback.invoke(null, asWritableMap());
+			}
+		}, "BleManager-L2CAP-Connect").start();
+	}
+
+	private void startL2CAPReader() {
+		l2capReaderThread = new Thread(new Runnable() {
+			@Override
+			public void run() {
+				final byte[] buf = new byte[1024];
+				while (l2capRunning) {
+					final InputStream in = l2capInputStream;
+					if (in == null) break;
+					final int n;
+					try {
+						n = in.read(buf);
+					} catch (IOException e) {
+						if (l2capRunning) Log.d(BleManager.LOG_TAG, "L2CAP read ended: " + e);
+						break;
+					}
+					if (n < 0) break;
+					if (n == 0) continue;
+
+					final byte[] chunk = new byte[n];
+					System.arraycopy(buf, 0, chunk, 0, n);
+
+					WritableMap params = Arguments.createMap();
+					params.putString("peripheral", device.getAddress());
+					params.putInt("psm", l2capPsm);
+					params.putArray("data", BleManager.bytesToWritableArray(chunk));
+					sendEvent("BleManagerDidReceiveDataStream", params);
+				}
+				Log.d(BleManager.LOG_TAG, "L2CAP reader exiting");
+				closeL2CAPChannel();
+			}
+		}, "BleManager-L2CAP-Reader");
+		l2capReaderThread.start();
+	}
+
+	public void sendL2CAPStreamData(ReadableArray message, Callback callback) {
+		OutputStream out = l2capOutputStream;
+		if (out == null) {
+			callback.invoke("No L2CAP channel open");
+			return;
+		}
+		final int len = message.size();
+		byte[] bytes = new byte[len];
+		for (int i = 0; i < len; i++) {
+			bytes[i] = (byte) message.getInt(i);
+		}
+		try {
+			out.write(bytes);
+			out.flush();
+			callback.invoke();
+		} catch (IOException e) {
+			Log.e(BleManager.LOG_TAG, "L2CAP write failed", e);
+			callback.invoke(e.toString());
+		}
+	}
+
+	private synchronized void closeL2CAPChannel() {
+		if (l2capSocket == null && l2capInputStream == null && l2capOutputStream == null) return;
+		l2capRunning = false;
+		BluetoothSocket socket = l2capSocket;
+		l2capSocket = null;
+		l2capInputStream = null;
+		l2capOutputStream = null;
+		if (socket != null) {
+			try { socket.close(); } catch (IOException ignored) {}
+		}
+		l2capReaderThread = null;
 	}
 
 }

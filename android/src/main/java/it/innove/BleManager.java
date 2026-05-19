@@ -681,6 +681,29 @@ class BleManager extends ReactContextBaseJavaModule {
         }
     }
 
+    @ReactMethod
+    public void openL2CAPChannel(String deviceUUID, int psm, Callback callback) {
+        Log.d(LOG_TAG, "Open L2CAP channel (psm " + psm + ") on: " + deviceUUID);
+        Peripheral peripheral = peripherals.get(deviceUUID);
+        if (peripheral != null) {
+            peripheral.openL2CAPChannel(psm, callback);
+        } else {
+            callback.invoke("Peripheral not found");
+        }
+    }
+
+    @ReactMethod
+    public void sendL2CAPStreamData(String deviceUUID, int psm, ReadableArray message, Callback callback) {
+        // psm is accepted to match the iOS API signature but ignored here:
+        // the channel is identified by the peripheral (only one channel per peripheral).
+        Peripheral peripheral = peripherals.get(deviceUUID);
+        if (peripheral != null) {
+            peripheral.sendL2CAPStreamData(message, callback);
+        } else {
+            callback.invoke("Peripheral not found");
+        }
+    }
+
     private final static char[] hexArray = "0123456789ABCDEF".toCharArray();
 
     public static String bytesToHex(byte[] bytes) {
