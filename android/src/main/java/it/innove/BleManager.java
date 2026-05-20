@@ -226,6 +226,7 @@ class BleManager extends ReactContextBaseJavaModule {
     public void createBond(String peripheralUUID, String peripheralPin, Callback callback) {
         Log.d(LOG_TAG, "Request bond to: " + peripheralUUID);
 
+        // Already bonded: nothing to do.
         Set<BluetoothDevice> deviceSet = getBluetoothAdapter().getBondedDevices();
         for (BluetoothDevice device : deviceSet) {
             if (peripheralUUID.equalsIgnoreCase(device.getAddress())) {
@@ -238,7 +239,33 @@ class BleManager extends ReactContextBaseJavaModule {
         if (peripheral == null) {
             callback.invoke("Invalid peripheral uuid");
             return;
-        } else if (bondRequest != null) {
+        }
+
+        // Bond already in progress (e.g. Android auto-initiated bonding when
+        // retrieveServices touched an encrypted characteristic). Calling
+        // device.createBond() now would re-issue the SSP pairing dialog —
+        // hook into the in-flight bond so this caller still receives a
+        // single callback when it completes.
+        int currentBondState = peripheral.getDevice().getBondState();
+        if (currentBondState == BluetoothDevice.BOND_BONDING) {
+            Log.d(LOG_TAG, "Bond already in progress for: " + peripheralUUID);
+            if (bondRequest != null) {
+                callback.invoke("Only allow one bond request at a time");
+                return;
+            }
+            bondRequest = new BondRequest(peripheralUUID, peripheralPin, callback);
+            // Race guard: bond may have transitioned to BONDED between
+            // the getBondState() above and the assignment. Fire ourselves
+            // if so, otherwise the bond-state broadcast receiver will.
+            if (peripheral.getDevice().getBondState() == BluetoothDevice.BOND_BONDED) {
+                Callback pending = bondRequest.callback;
+                bondRequest = null;
+                pending.invoke();
+            }
+            return;
+        }
+
+        if (bondRequest != null) {
             callback.invoke("Only allow one bond request at a time");
             return;
         } else if (peripheral.getDevice().createBond()) {
